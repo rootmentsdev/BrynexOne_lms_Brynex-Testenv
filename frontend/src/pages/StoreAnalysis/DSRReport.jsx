@@ -274,6 +274,10 @@ const STORE_TO_LOC_CODE = {
   "sgcalicut": "712",
   "gvadakara": "708",
   "sgvadakara": "708",
+  "gvatakara": "708",
+  "sgvatakara": "708",
+  "vatakara": "708",
+  "vadakara": "708",
   "gedappal": "707",
   "sgedappal": "707",
   "gperinthalmanna": "709",
@@ -294,13 +298,30 @@ const STORE_TO_LOC_CODE = {
 
 function getBranchLocCode(workingBranch, branchesList) {
   if (!workingBranch) return null;
+  const str = String(workingBranch).trim().toLowerCase();
+  
   const found = (branchesList || []).find(
-    (b) => String(b.workingBranch).trim().toLowerCase() === String(workingBranch).trim().toLowerCase()
+    (b) => String(b.workingBranch).trim().toLowerCase() === str || String(b.locCode) === str
   );
-  if (found && found.locCode) return found.locCode;
+  if (found && found.locCode) return String(found.locCode);
 
-  const normalized = String(workingBranch).trim().toLowerCase().replace(/[^a-z0-9]/g, "");
-  return STORE_TO_LOC_CODE[normalized] || null;
+  const cleanLoc = str.replace(/^(suitor guy|grooms|zorucci|sg|g|z)[\.\-\s]*/i, "").replace(/vatakara/g, "vadakara").replace(/[^a-z0-9]/g, "");
+  const normalized = str.replace(/[^a-z0-9]/g, "");
+
+  if (STORE_TO_LOC_CODE[normalized]) return String(STORE_TO_LOC_CODE[normalized]);
+  if (cleanLoc && STORE_TO_LOC_CODE[`sg${cleanLoc}`]) return String(STORE_TO_LOC_CODE[`sg${cleanLoc}`]);
+  if (cleanLoc && STORE_TO_LOC_CODE[`g${cleanLoc}`]) return String(STORE_TO_LOC_CODE[`g${cleanLoc}`]);
+  if (cleanLoc && STORE_TO_LOC_CODE[`z${cleanLoc}`]) return String(STORE_TO_LOC_CODE[`z${cleanLoc}`]);
+
+  if (branchesList && cleanLoc) {
+    const matchedBranch = branchesList.find(b => {
+      const bClean = String(b.workingBranch || '').toLowerCase().replace(/^(suitor guy|grooms|zorucci|sg|g|z)[\.\-\s]*/i, "").replace(/[^a-z0-9]/g, "");
+      return bClean === cleanLoc || (bClean && cleanLoc.includes(bClean)) || (cleanLoc && bClean.includes(cleanLoc));
+    });
+    if (matchedBranch && matchedBranch.locCode) return String(matchedBranch.locCode);
+  }
+
+  return null;
 }
 
 const runWithConcurrencyLimit = async (tasks, limit) => {
@@ -2448,9 +2469,10 @@ const DSRReport = () => {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         };
-        const [empRes, adminRes] = await Promise.all([
+        const [empRes, adminRes, greyRes] = await Promise.all([
           fetch(`${baseUrl.baseUrl}api/admin/accessible-employees`, { headers }).catch(() => null),
-          fetch(`${baseUrl.baseUrl}api/admin/admin/list`, { headers }).catch(() => null)
+          fetch(`${baseUrl.baseUrl}api/admin/admin/list`, { headers }).catch(() => null),
+          fetch(`${baseUrl.baseUrl}api/greythr/employees?limit=500`, { headers }).catch(() => null)
         ]);
 
         const list = [];
@@ -2468,6 +2490,22 @@ const DSRReport = () => {
                 ...a,
                 EmpId: a.EmpId || a.employeeId || a.empCode,
                 name: a.name || a.username
+              });
+            }
+          });
+        }
+        if (greyRes?.ok) {
+          const json = await greyRes.json();
+          const greyList = Array.isArray(json?.data) ? json.data : (Array.isArray(json) ? json : []);
+          greyList.forEach(g => {
+            if (g && (g.empID || g.EmpId)) {
+              list.push({
+                ...g,
+                EmpId: g.empID || g.EmpId,
+                name: g.username || g.name || `${g.firstName || ''} ${g.lastName || ''}`.trim(),
+                workingBranch: g.workingBranch || g.branch || g.store,
+                leftorg: Boolean(g.leftorg),
+                leavingDate: g.leavingDate || null
               });
             }
           });
@@ -3303,7 +3341,6 @@ const DSRReport = () => {
       const getOrCreateStaffEntry = (empCode, rawName) => {
         const normCode = normalizeEmpCode(empCode);
         const rentalName = rawName ? String(rawName).trim() : "";
-        const canonName = rentalName ? getCanonicalStaffName(rentalName) : "";
 
         let entry = null;
 
@@ -3316,12 +3353,10 @@ const DSRReport = () => {
           }
         }
 
-        if (!entry && (rentalName || canonName)) {
+        if (!entry && (rentalName || normCode)) {
           for (const e of staffMap.values()) {
             if (
-              isStaffNameMatch(e.displayName, rentalName) ||
-              isStaffNameMatch(e.displayName, canonName) ||
-              e.rentalNames.some(rn => isStaffNameMatch(rn, rentalName) || isStaffNameMatch(rn, canonName))
+              rentalName && (isStaffNameMatch(e.displayName, rentalName) || e.rentalNames.some(rn => isStaffNameMatch(rn, rentalName)))
             ) {
               entry = e;
               break;
@@ -3332,11 +3367,11 @@ const DSRReport = () => {
         if (!entry) {
           entry = {
             empCodes: normCode ? [normCode] : [],
-            displayName: rentalName || canonName || "Unassigned",
+            displayName: rentalName || (normCode ? `Emp ${normCode}` : "Unassigned"),
             rentalNames: rentalName ? [rentalName] : [],
             siteNames: []
           };
-          const key = normCode || (canonName || "unassigned").toLowerCase();
+          const key = normCode || (rentalName || "unassigned").toLowerCase();
           staffMap.set(key, entry);
         } else {
           if (normCode && !entry.empCodes.includes(normCode)) {
@@ -3355,10 +3390,22 @@ const DSRReport = () => {
 
       const locCode = selectedBranch?.locCode || getBranchLocCode(selectedBranch?.workingBranch, branches);
       
-      // 0. Seed all staff members belonging to this store
+      // 0. Seed all staff members belonging to this store (Date-Aware for Resigned Employees)
       systemEmployees.forEach(e => {
         const b = e?.workingBranch || e?.branch || e?.store;
         if (b && (normalizeForMatch(b) === storeKeyVal || displayBranchName(b) === storeName || getBranchLocCode(b, branches) === locCode)) {
+           // If employee resigned, only include them if they were still working during the selected report period
+           if (e.leftorg) {
+             if (e.leavingDate) {
+               const lDate = String(e.leavingDate).split('T')[0];
+               if (lDate < periodStart) {
+                 return; // Left before this report period started -> Skip
+               }
+             } else {
+               return; // Left without leaving date -> Skip
+             }
+           }
+
            const rawName = e.name || e.username || (e.firstName && e.lastName ? `${e.firstName} ${e.lastName}` : '');
            const empCode = e.EmpId || e.employeeId || e.empCode;
            if (rawName || empCode) {
@@ -3367,33 +3414,24 @@ const DSRReport = () => {
         }
       });
 
-      // 1. Process Rental POS items (FTD + Period)
+      // 1. Process Rental POS items & Shoe Sales to associate aliases (without spawning new rows)
       [...locFtdList, ...locPeriodList].forEach(x => {
         if (x && (x.bookingBy || x.empCode)) {
           const rentalCode = normalizeEmpCode(x.empCode) || systemEmpNameToCodeMap.get(getCanonicalStaffName(x.bookingBy).toLowerCase()) || systemEmpNameToCodeMap.get(normalizeForMatch(x.bookingBy)) || "";
-          getOrCreateStaffEntry(rentalCode, x.bookingBy);
+          if (rentalCode) {
+            for (const e of staffMap.values()) {
+              if (e.empCodes.includes(rentalCode)) {
+                if (x.bookingBy && !e.rentalNames.includes(x.bookingBy)) {
+                  e.rentalNames.push(x.bookingBy);
+                }
+                break;
+              }
+            }
+          }
         }
       });
 
-      // 2. Process Shoe/Shirt Sales items if present
-      if (funnelView === "Consolidated") {
-        const byStaffMap = { ...(salesFtdItem.byStaff || {}), ...(salesPeriodItem.byStaff || {}) };
-        const seenSalesStaff = new Set();
-        Object.values(byStaffMap).forEach(item => {
-          if (!item || !item.staffName) return;
-          const rawName = item.staffName;
-          const rawCode = item.empCode || "";
-          const salesCode = rawCode || normalizeEmpCode(rawName) || systemEmpNameToCodeMap.get(getCanonicalStaffName(rawName).toLowerCase()) || systemEmpNameToCodeMap.get(normalizeForMatch(rawName)) || "";
-          
-          const dedupeKey = salesCode || normalizeForMatch(rawName);
-          if (seenSalesStaff.has(dedupeKey)) return;
-          seenSalesStaff.add(dedupeKey);
-
-          getOrCreateStaffEntry(salesCode, rawName);
-        });
-      }
-
-      // 3. Process Walk-ins for this store
+      // 2. Process Walk-ins for this store (associate with existing greytHR staff only)
       const storeWalkins = walkins.filter(w => {
         return String(w.storeId || '') === String(selectedBranch?._id || '') ||
                locationKey(w.store) === storeKeyVal ||
@@ -3427,17 +3465,7 @@ const DSRReport = () => {
           }
         }
 
-        if (!entry) {
-          const canonW = wStaff ? getCanonicalStaffName(wStaff) : "Unassigned";
-          entry = {
-            empCodes: wCodes,
-            displayName: wStaff || canonW,
-            rentalNames: [],
-            siteNames: wStaff ? [wStaff] : []
-          };
-          const key = wCodes[0] || canonW.toLowerCase();
-          staffMap.set(key, entry);
-        } else {
+        if (entry) {
           wCodes.forEach(c => {
             if (!entry.empCodes.includes(c)) entry.empCodes.push(c);
           });
@@ -3467,14 +3495,14 @@ const DSRReport = () => {
       return Array.from(staffMap.values()).map(entry => {
         const staffFtdList = locFtdList.filter(x => {
           if (!x) return false;
-          const xCode = normalizeEmpCode(x.empCode);
+          const xCode = normalizeEmpCode(x.empCode || x.empID || x.EmpId || x.employeeId);
           if (xCode && entry.empCodes.includes(xCode)) return true;
           return entry.rentalNames.some(rn => isStaffNameMatch(rn, x.bookingBy)) || isStaffNameMatch(entry.displayName, x.bookingBy);
         });
 
         const staffPeriodList = locPeriodList.filter(x => {
           if (!x) return false;
-          const xCode = normalizeEmpCode(x.empCode);
+          const xCode = normalizeEmpCode(x.empCode || x.empID || x.EmpId || x.employeeId);
           if (xCode && entry.empCodes.includes(xCode)) return true;
           return entry.rentalNames.some(rn => isStaffNameMatch(rn, x.bookingBy)) || isStaffNameMatch(entry.displayName, x.bookingBy);
         });

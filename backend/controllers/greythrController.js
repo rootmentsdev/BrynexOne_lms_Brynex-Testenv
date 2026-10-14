@@ -49,7 +49,9 @@ function normalizeGreytHREmployee(item, categoriesMap = new Map()) {
     taskCount: Number(item.taskCount) || 0,
     passCountTask: Number(item.passCountTask) || 0,
     taskDue: Number(item.taskDue) || 0,
-    taskPending: Number(item.taskPending) || 0,
+    taskPending: Number(item.taskPending) !== undefined ? Number(item.taskPending) : 0,
+    leftorg: Boolean(item.leftorg),
+    leavingDate: item.leavingDate || null,
     rawSource: 'greytHR',
   };
 }
@@ -101,6 +103,14 @@ export async function getEmployees(req, res) {
     });
     employees = Array.from(uniqueMap.values());
 
+    // Extract available store and role filter options
+    const storesSet = new Set();
+    const rolesSet = new Set();
+    employees.forEach(emp => {
+      if (emp.workingBranch) storesSet.add(emp.workingBranch);
+      if (emp.designation) rolesSet.add(emp.designation);
+    });
+
     // Apply search filter
     if (search) {
       employees = employees.filter(e =>
@@ -121,12 +131,12 @@ export async function getEmployees(req, res) {
       employees = employees.filter(e => e.designation.toLowerCase().includes(roleFilter.toLowerCase()));
     }
 
-    // Build filter lists dynamically
-    const storesSet = new Set(['All']);
-    const rolesSet = new Set(['All']);
-    employees.forEach(e => {
-      if (e.workingBranch) storesSet.add(e.workingBranch);
-      if (e.designation) rolesSet.add(e.designation);
+    // Sort employees by natural numeric order (Emp1, Emp2, Emp3 ... Emp10 ... Emp140)
+    employees.sort((a, b) => {
+      const numA = parseInt((a.empID || '').replace(/\D/g, ''), 10) || 0;
+      const numB = parseInt((b.empID || '').replace(/\D/g, ''), 10) || 0;
+      if (numA !== numB) return numA - numB;
+      return (a.empID || '').localeCompare(b.empID || '');
     });
 
     // Pagination

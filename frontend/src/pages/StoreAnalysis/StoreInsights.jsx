@@ -146,6 +146,10 @@ const STORE_TO_LOC_CODE = {
   "sgcalicut": "712",
   "gvadakara": "708",
   "sgvadakara": "708",
+  "gvatakara": "708",
+  "sgvatakara": "708",
+  "vatakara": "708",
+  "vadakara": "708",
   "gedappal": "707",
   "sgedappal": "707",
   "gperinthalmanna": "709",
@@ -166,12 +170,30 @@ const STORE_TO_LOC_CODE = {
 
 function getBranchLocCode(workingBranch, branchesList) {
   if (!workingBranch) return null;
+  const str = String(workingBranch).trim().toLowerCase();
+  
   const found = (branchesList || []).find(
-    (b) => String(b.workingBranch).trim().toLowerCase() === String(workingBranch).trim().toLowerCase()
+    (b) => String(b.workingBranch).trim().toLowerCase() === str || String(b.locCode) === str
   );
-  if (found && found.locCode) return found.locCode;
-  const normalized = String(workingBranch).trim().toLowerCase().replace(/[^a-z0-9]/g, "");
-  return STORE_TO_LOC_CODE[normalized] || null;
+  if (found && found.locCode) return String(found.locCode);
+
+  const cleanLoc = str.replace(/^(suitor guy|grooms|zorucci|sg|g|z)[\.\-\s]*/i, "").replace(/vatakara/g, "vadakara").replace(/[^a-z0-9]/g, "");
+  const normalized = str.replace(/[^a-z0-9]/g, "");
+
+  if (STORE_TO_LOC_CODE[normalized]) return String(STORE_TO_LOC_CODE[normalized]);
+  if (cleanLoc && STORE_TO_LOC_CODE[`sg${cleanLoc}`]) return String(STORE_TO_LOC_CODE[`sg${cleanLoc}`]);
+  if (cleanLoc && STORE_TO_LOC_CODE[`g${cleanLoc}`]) return String(STORE_TO_LOC_CODE[`g${cleanLoc}`]);
+  if (cleanLoc && STORE_TO_LOC_CODE[`z${cleanLoc}`]) return String(STORE_TO_LOC_CODE[`z${cleanLoc}`]);
+
+  if (branchesList && cleanLoc) {
+    const matchedBranch = branchesList.find(b => {
+      const bClean = String(b.workingBranch || '').toLowerCase().replace(/^(suitor guy|grooms|zorucci|sg|g|z)[\.\-\s]*/i, "").replace(/[^a-z0-9]/g, "");
+      return bClean === cleanLoc || (bClean && cleanLoc.includes(bClean)) || (cleanLoc && bClean.includes(cleanLoc));
+    });
+    if (matchedBranch && matchedBranch.locCode) return String(matchedBranch.locCode);
+  }
+
+  return null;
 }
 
 // Maps Dappr Squad (loc 25) bookingBy names → the target store locId they belong to
@@ -2415,9 +2437,10 @@ const StoreInsights = () => {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         };
-        const [empRes, adminRes] = await Promise.all([
+        const [empRes, adminRes, greyRes] = await Promise.all([
           fetch(`${baseUrl.baseUrl}api/admin/accessible-employees`, { headers }).catch(() => null),
-          fetch(`${baseUrl.baseUrl}api/admin/admin/list`, { headers }).catch(() => null)
+          fetch(`${baseUrl.baseUrl}api/admin/admin/list`, { headers }).catch(() => null),
+          fetch(`${baseUrl.baseUrl}api/greythr/employees?limit=500`, { headers }).catch(() => null)
         ]);
 
         const list = [];
@@ -2435,6 +2458,22 @@ const StoreInsights = () => {
                 ...a,
                 EmpId: a.EmpId || a.employeeId || a.empCode,
                 name: a.name || a.username
+              });
+            }
+          });
+        }
+        if (greyRes?.ok) {
+          const json = await greyRes.json();
+          const greyList = Array.isArray(json?.data) ? json.data : (Array.isArray(json) ? json : []);
+          greyList.forEach(g => {
+            if (g && (g.empID || g.EmpId)) {
+              list.push({
+                ...g,
+                EmpId: g.empID || g.EmpId,
+                name: g.username || g.name || `${g.firstName || ''} ${g.lastName || ''}`.trim(),
+                workingBranch: g.workingBranch || g.branch || g.store,
+                leftorg: Boolean(g.leftorg),
+                leavingDate: g.leavingDate || null
               });
             }
           });
@@ -3255,13 +3294,11 @@ const StoreInsights = () => {
     const staffMap = new Map();
 
     const getOrCreateStaffEntry = (rawEmpCode, rawName) => {
-      const normCode = normalizeEmpCode(rawEmpCode) || systemEmpNameToCodeMap?.get(getCanonicalStaffName(rawName).toLowerCase()) || systemEmpNameToCodeMap?.get(normalizeForMatch(rawName)) || "";
+      const normCode = normalizeEmpCode(rawEmpCode) || systemEmpNameToCodeMap?.get(normalizeForMatch(rawName)) || "";
       const trimmedName = rawName ? String(rawName).trim() : "";
-      const canonName = trimmedName ? getCanonicalStaffName(trimmedName) : "";
 
       let entry = null;
 
-      // 1. Match by employee code / ID first (Universal single source of truth!)
       if (normCode) {
         for (const e of staffMap.values()) {
           if (e.empCodes.includes(normCode)) {
@@ -3271,13 +3308,10 @@ const StoreInsights = () => {
         }
       }
 
-      // 2. Match by canonical / alias / fuzzy name
-      if (!entry && (trimmedName || canonName)) {
+      if (!entry && (trimmedName || normCode)) {
         for (const e of staffMap.values()) {
           if (
-            isStaffNameMatch(e.displayName, trimmedName) ||
-            isStaffNameMatch(e.displayName, canonName) ||
-            e.rawNames.some(rn => isStaffNameMatch(rn, trimmedName) || isStaffNameMatch(rn, canonName))
+            trimmedName && (isStaffNameMatch(e.displayName, trimmedName) || e.rawNames.some(rn => isStaffNameMatch(rn, trimmedName)))
           ) {
             entry = e;
             break;
@@ -3288,10 +3322,10 @@ const StoreInsights = () => {
       if (!entry) {
         entry = {
           empCodes: normCode ? [normCode] : [],
-          displayName: canonName || trimmedName || "Unassigned",
+          displayName: trimmedName || (normCode ? `Emp ${normCode}` : "Unassigned"),
           rawNames: trimmedName ? [trimmedName] : []
         };
-        const key = normCode || (canonName || "unassigned").toLowerCase();
+        const key = normCode || (trimmedName || "unassigned").toLowerCase();
         staffMap.set(key, entry);
       } else {
         if (normCode && !entry.empCodes.includes(normCode)) {
@@ -3300,14 +3334,36 @@ const StoreInsights = () => {
         if (trimmedName && !entry.rawNames.includes(trimmedName)) {
           entry.rawNames.push(trimmedName);
         }
-        // Prefer the longer/more complete display name if matching
-        if (canonName && canonName.length > entry.displayName.length && !isDapprSquadName(canonName)) {
-          entry.displayName = canonName;
+        if (trimmedName && trimmedName.length > entry.displayName.length) {
+          entry.displayName = trimmedName;
         }
       }
 
       return entry;
     };
+
+    // 0. Seed all staff members belonging to this store from greytHR (Master List, Date-Aware)
+    systemEmployees.forEach(e => {
+      const b = e?.workingBranch || e?.branch || e?.store;
+      if (b && (normalizeForMatch(b) === normKey || displayBranchName(b) === storeName || getBranchLocCode(b, branches) === String(locCode))) {
+        if (e.leftorg) {
+          if (e.leavingDate) {
+            const lDate = String(e.leavingDate).split('T')[0];
+            const startDate = timeframe === "CUSTOM" && customStartDate ? customStartDate : getLocalDateString(new Date(new Date().getFullYear(), new Date().getMonth(), 1));
+            if (lDate < startDate) {
+              return; // Left before this timeframe started -> Skip
+            }
+          } else {
+            return;
+          }
+        }
+        const rawName = e.name || e.username || (e.firstName && e.lastName ? `${e.firstName} ${e.lastName}` : '');
+        const empCode = e.EmpId || e.employeeId || e.empCode;
+        if (rawName || empCode) {
+          getOrCreateStaffEntry(empCode, rawName);
+        }
+      }
+    });
 
     // 1. Process Rental POS items for this location
     if (includeRental) {

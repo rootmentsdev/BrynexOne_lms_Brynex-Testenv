@@ -140,7 +140,10 @@ const EmployeeData = () => {
       if (json.success && Array.isArray(json.data)) {
         const mapped = json.data.map(mapEmployee);
         const sorted = [...mapped].sort((a, b) => {
-          return (a.empID || "").localeCompare(b.empID || "", undefined, { numeric: true, sensitivity: 'base' });
+          const numA = parseInt((a.empID || '').replace(/\D/g, ''), 10) || 0;
+          const numB = parseInt((b.empID || '').replace(/\D/g, ''), 10) || 0;
+          if (numA !== numB) return numA - numB;
+          return (a.empID || '').localeCompare(b.empID || '');
         });
         
         // Filter out employees on top of them (higher or equal role) if restricted

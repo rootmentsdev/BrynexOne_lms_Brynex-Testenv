@@ -213,6 +213,182 @@ export async function logEmployeeCategoriesExample() {
   }
 }
 
+import Employee from '../model/Employee.js';
+import User from '../model/User.js';
+import Branch from '../model/Branch.js';
+
+/**
+ * Sync all GreytHR employees into MongoDB (Employee & User collections)
+ */
+export async function syncGreytHREmployeesToDB() {
+  try {
+    console.log('🔄 Starting greytHR Employee Sync to MongoDB...');
+    
+    // 1. Fetch raw employees from greytHR
+    const empRes = await request('/employee/v2/employees?page=0&size=2000');
+    const rawList = empRes?.data || (Array.isArray(empRes) ? empRes : []);
+
+    if (!rawList || rawList.length === 0) {
+      console.warn('⚠️ No employees returned from greytHR.');
+      return { success: false, message: 'No employees found in greytHR' };
+    }
+
+    // 2. Fetch category metadata
+    const categoriesMap = new Map();
+    try {
+      const catRes = await request('/employee/v2/employees/categories?descRequired=true&page=0&size=2000');
+      const catItems = catRes?.data || [];
+      catItems.forEach(item => {
+        const catObj = {};
+        (item.categoryList || []).forEach(c => {
+          if (c.categoryDesc && c.valueDesc) {
+            catObj[c.categoryDesc] = c.valueDesc;
+          }
+        });
+        categoriesMap.set(item.employeeId, catObj);
+      });
+    } catch (catErr) {
+      console.warn('⚠️ Could not fetch GreytHR categories during sync:', catErr.message);
+    }
+
+    // 3. Fetch all branches to map locCode & storeId
+    const branches = await Branch.find({}).lean();
+    const branchMap = new Map();
+    branches.forEach(b => {
+      if (b.workingBranch) branchMap.set(b.workingBranch.toLowerCase(), b);
+      if (b.locCode) branchMap.set(String(b.locCode), b);
+    });
+
+    let syncedCount = 0;
+
+    for (const item of rawList) {
+      const empID = item.employeeNo || item.empNo || item.employeeId || item.empID || item.id || '';
+      if (!empID) continue;
+
+      const firstName = item.firstName || item.first_name || '';
+      const lastName = item.lastName || item.last_name || '';
+      const fullName = item.employeeName || item.name || item.fullName || `${firstName} ${lastName}`.trim() || 'Employee';
+
+      const cat = categoriesMap.get(item.employeeId) || {};
+      const designation = cat['Designation']
+        || (typeof item.designation === 'object' ? item.designation?.name : item.designation)
+        || item.role || item.jobTitle || 'Employee';
+
+      const branchNameRaw = cat['Store Name']
+        || cat['Department']
+        || cat['Location']
+        || (typeof item.location === 'object' ? item.location?.name : item.location)
+        || (typeof item.department === 'object' ? item.department?.name : item.department)
+        || item.workingBranch || item.branch || item.store || 'Main Store';
+
+      const email = item.email || item.personalEmail || item.officialEmail || `${empID.toLowerCase()}@brynex.local`;
+      const phoneNumber = item.mobile || item.phone || item.phoneNumber || '';
+      const status = item.leftorg ? 'Inactive' : 'Active';
+
+      // Match branch
+      let matchedBranch = branchMap.get(branchNameRaw.toLowerCase());
+      if (!matchedBranch) {
+        matchedBranch = branches.find(b =>
+          b.workingBranch && (
+            b.workingBranch.toLowerCase().includes(branchNameRaw.toLowerCase()) ||
+            branchNameRaw.toLowerCase().includes(b.workingBranch.toLowerCase())
+          )
+        );
+      }
+      const locCode = matchedBranch ? matchedBranch.locCode : '700';
+      const workingBranch = matchedBranch ? matchedBranch.workingBranch : branchNameRaw;
+      const storeId = matchedBranch ? matchedBranch._id : null;
+
+      try {
+        const safeFirstName = (firstName || fullName.split(' ')[0] || 'Employee').trim();
+        const safeLastName = (lastName || fullName.split(' ').slice(1).join(' ') || '.').trim();
+        const safePhone = (phoneNumber || '0000000000').trim();
+        const safeDept = (branchNameRaw || 'Sales').trim();
+        const safeDesignation = (designation || 'Staff').trim();
+
+        // Upsert into Employee collection
+        let existingEmp = await Employee.findOne({ $or: [{ employeeId: empID }, { email: email }] });
+        if (existingEmp) {
+          existingEmp.employeeId = empID;
+          existingEmp.firstName = safeFirstName;
+          existingEmp.lastName = safeLastName;
+          if (email && (!existingEmp.email || existingEmp.email === email)) existingEmp.email = email;
+          existingEmp.phoneNumber = safePhone;
+          existingEmp.department = safeDept;
+          existingEmp.designation = safeDesignation;
+          existingEmp.status = status;
+          existingEmp.workingBranch = workingBranch;
+          if (storeId) existingEmp.storeId = storeId;
+          existingEmp.updatedAt = new Date();
+          await existingEmp.save();
+        } else {
+          await Employee.create({
+            employeeId: empID,
+            firstName: safeFirstName,
+            lastName: safeLastName,
+            email: email,
+            phoneNumber: safePhone,
+            department: safeDept,
+            designation: safeDesignation,
+            status: status,
+            workingBranch: workingBranch,
+            storeId: storeId,
+            dateOfJoining: item.doj ? new Date(item.doj) : new Date(),
+            salary: 0,
+            address: { country: 'India' }
+          });
+        }
+
+        // Upsert into User collection safely handling email unique constraint
+        let existingUser = await User.findOne({ $or: [{ empID: empID }, { email: email }] });
+        if (existingUser) {
+          existingUser.empID = empID;
+          existingUser.username = fullName;
+          if (email && existingUser.email !== email) {
+            const emailOwner = await User.findOne({ email: email, _id: { $ne: existingUser._id } });
+            if (!emailOwner) existingUser.email = email;
+          }
+          if (phoneNumber) existingUser.phoneNumber = phoneNumber;
+          existingUser.designation = designation;
+          existingUser.workingBranch = workingBranch;
+          existingUser.locCode = locCode;
+          existingUser.source = 'external-sync';
+          existingUser.updatedAt = new Date();
+          await existingUser.save();
+        } else {
+          // Check if email belongs to another user
+          let finalEmail = email;
+          const emailOwner = await User.findOne({ email: email });
+          if (emailOwner) {
+            finalEmail = `${empID.toLowerCase()}@brynex.local`;
+          }
+          await User.create({
+            empID: empID,
+            username: fullName,
+            email: finalEmail,
+            phoneNumber: phoneNumber || '',
+            designation: designation,
+            workingBranch: workingBranch,
+            locCode: locCode,
+            source: 'external-sync',
+            registrationStatus: 'approved'
+          });
+        }
+
+        syncedCount++;
+      } catch (itemErr) {
+        console.warn(`⚠️ Warning syncing employee ${empID} (${fullName}):`, itemErr.message);
+      }
+    }
+
+    console.log(`✅ Successfully synced ${syncedCount} employees from greytHR to MongoDB.`);
+    return { success: true, count: syncedCount };
+  } catch (err) {
+    console.error('❌ Error during greytHR employee sync:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
 export default {
   getGreytHRDomain,
   clearTokenCache,
@@ -221,5 +397,6 @@ export default {
   getEmployeeCategories,
   getEmployees,
   logEmployeeCategoriesExample,
+  syncGreytHREmployeesToDB,
 };
 

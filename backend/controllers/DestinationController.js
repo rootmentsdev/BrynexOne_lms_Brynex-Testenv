@@ -1153,6 +1153,16 @@ export const getAccessibleEmployees = async (req, res) => {
             return true;
         });
 
+        // Natural numeric sort by Employee ID (Emp1, Emp2, Emp3 ... Emp10 ... Emp140)
+        filteredEmployees.sort((a, b) => {
+            const idA = a.employeeId || a.empID || a.EmpId || '';
+            const idB = b.employeeId || b.empID || b.EmpId || '';
+            const numA = parseInt(String(idA).replace(/\D/g, ''), 10) || 0;
+            const numB = parseInt(String(idB).replace(/\D/g, ''), 10) || 0;
+            if (numA !== numB) return numA - numB;
+            return String(idA).localeCompare(String(idB));
+        });
+
         res.status(200).json({ employees: filteredEmployees });
     } catch (error) {
         console.error("Error fetching accessible employees:", error);

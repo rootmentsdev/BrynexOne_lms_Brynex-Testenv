@@ -681,6 +681,7 @@ app.use('/api/task-category', CategoryRouter)
 import CustomizationAttributionRouter from './routes/CustomizationAttributionRoute.js'
 import StoreTargetRouter from './routes/StoreTargetRoute.js'
 import GreythrRouter from './routes/greythrRoute.js'
+import { syncGreytHREmployeesToDB } from './services/greythrService.js'
 app.use('/api/store-targets', StoreTargetRouter)
 app.use('/api/dappr-attributions', DapprAttributionRouter)
 app.use('/api/customization-attributions', CustomizationAttributionRouter)
@@ -871,6 +872,12 @@ connectMongoDB().then(async () => {
     
     // Start existing notification cron job
     AlertNotification();
+
+    // Initial greytHR employee sync on startup & every 30 minutes
+    syncGreytHREmployeesToDB().catch(err => console.error("Initial greytHR sync failed:", err.message));
+    setInterval(() => {
+      syncGreytHREmployeesToDB().catch(err => console.error("Periodic greytHR sync failed:", err.message));
+    }, 30 * 60 * 1000);
     
     // 📊 Job Health Monitor - runs every hour at :30 to check all jobs
     cron.schedule('30 * * * *', () => {
@@ -881,6 +888,7 @@ connectMongoDB().then(async () => {
       console.log('✅ All cron jobs are running');
       console.log('  • Walkin Status Sync: Every 15 minutes');
       console.log('  • Auto Task Generation: Every hour at :05 (staggered)');
+      console.log('  • greytHR Employee Sync: Every 30 minutes');
       console.log('  • Walkin Loss Expiry: Daily at 11:00 PM IST');
       console.log('  • AlertNotification: Daily at 6:30 PM IST');
       console.log(`${'='.repeat(60)}\n`);
@@ -888,6 +896,7 @@ connectMongoDB().then(async () => {
     
     console.log('\n🕐 Cron Schedule:');
     console.log('  • Every 15 min - Walkin Status Sync');
+    console.log('  • Every 30 min - greytHR Employee Sync');
     console.log('  • :05 min - Auto Task Generation (staggered)');
     console.log('  • :30 min - Health Check');
     console.log('  • 11:00 PM - Walkin Loss Expiry\n');
