@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import Notification from '../model/Notification.js';
 import User from '../model/User.js';
 import Admin from '../model/Admin.js';
@@ -25,11 +26,16 @@ export const sendNotification = async ({
   category = 'General'
 }) => {
   try {
-    // 1. Save notification to database first
+    // 1. Sanitize userIds to only valid ObjectIds for the Notification.user Schema
+    const validUserObjectIds = (Array.isArray(userIds) ? userIds : [userIds])
+      .filter(id => id && mongoose.Types.ObjectId.isValid(String(id)))
+      .map(id => new mongoose.Types.ObjectId(String(id)));
+
+    // Save notification to database first
     const notification = await Notification.create({
       title,
       body,
-      user: userIds,
+      user: validUserObjectIds,
       Role: roles,
       branch: branches,
       useradmin: senderName,

@@ -130,8 +130,30 @@ export const shouldGenerateToday = (template, targetDate) => {
 
 /** Simple sequential task code generator (mirrors TaskController.nextTaskCode) */
 const nextTaskCode = async () => {
-  const count = await Task.countDocuments();
-  return `TSK-${String(count + 1).padStart(3, '0')}`;
+  const tasks = await Task.find({ taskCode: { $regex: /^TSK-\d+$/ } })
+    .select('taskCode')
+    .lean();
+
+  let maxNum = 0;
+  for (const t of tasks) {
+    const match = t.taskCode?.match(/^TSK-(\d+)$/);
+    if (match) {
+      const num = parseInt(match[1], 10);
+      if (!isNaN(num) && num > maxNum) {
+        maxNum = num;
+      }
+    }
+  }
+
+  let candidateNum = Math.max(maxNum + 1, (await Task.countDocuments()) + 1);
+  let candidate = `TSK-${String(candidateNum).padStart(3, '0')}`;
+
+  while (await Task.exists({ taskCode: candidate })) {
+    candidateNum++;
+    candidate = `TSK-${String(candidateNum).padStart(3, '0')}`;
+  }
+
+  return candidate;
 };
 
 /** Resolve store name + code from an Admin or User document */

@@ -375,8 +375,32 @@ export const mapTaskForClient = (doc, overrideBranch, requesterInfo) => {
 };
 
 const nextTaskCode = async () => {
-  const count = await Task.countDocuments();
-  return `TSK-${String(count + 1).padStart(3, '0')}`;
+  // Find highest numeric code to avoid E11000 duplicate key errors if tasks were deleted or generated
+  const tasks = await Task.find({ taskCode: { $regex: /^TSK-\d+$/ } })
+    .select('taskCode')
+    .lean();
+
+  let maxNum = 0;
+  for (const t of tasks) {
+    const match = t.taskCode?.match(/^TSK-(\d+)$/);
+    if (match) {
+      const num = parseInt(match[1], 10);
+      if (!isNaN(num) && num > maxNum) {
+        maxNum = num;
+      }
+    }
+  }
+
+  let candidateNum = Math.max(maxNum + 1, (await Task.countDocuments()) + 1);
+  let candidate = `TSK-${String(candidateNum).padStart(3, '0')}`;
+
+  // Ensure collision-free
+  while (await Task.exists({ taskCode: candidate })) {
+    candidateNum++;
+    candidate = `TSK-${String(candidateNum).padStart(3, '0')}`;
+  }
+
+  return candidate;
 };
 
 export const createTask = async (req, res) => {
@@ -618,14 +642,16 @@ export const createTask = async (req, res) => {
       });
       createdTasks.push(task);
       
-      // Send notification to the assignee
+      // Send notification to the assignee (fire safely in background)
       const creatorName = isCreatorAdmin ? creator.name : creator.username;
-      await sendNotification({
+      sendNotification({
         title: 'New Task Assigned',
         body: `You have been assigned a new task: "${title.trim()}" by ${creatorName}`,
         userIds: [target.id],
         senderName: creatorName,
         category: 'Task'
+      }).catch(notifErr => {
+        console.error('Failed to send task assignment notification:', notifErr.message);
       });
 
       index++;
